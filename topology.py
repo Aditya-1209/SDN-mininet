@@ -1,21 +1,32 @@
+#!/usr/bin/env python3
 """
-topology.py – Custom Mininet Topology for ARP Handling Demo
-============================================================
-Topology
---------
-    h1 (10.0.0.1 / 00:00:00:00:00:01)
-    h2 (10.0.0.2 / 00:00:00:00:00:02)   ── all connected to s1 ── Remote POX controller
-    h3 (10.0.0.3 / 00:00:00:00:00:03)
+Mininet Topology for SDN ARP Handling Project
+==============================================
+Topology:
+                  [POX Controller]
+                        |
+                    [Switch s1]
+                   /    |    \
+                 h1     h2    h3
+          10.0.0.1  10.0.0.2  10.0.0.3
 
-Run:
-    sudo python topology.py
+    h4 and h5 are connected via a second switch s2 (linked to s1)
+    so we can demonstrate inter-switch ARP handling.
 
-Make sure the POX controller is already running on 127.0.0.1:6633 before
-starting Mininet.
+                  [POX Controller]
+                        |
+              [s1]------[s2]
+             / | \        \
+           h1  h2  h3      h4  h5
+        .1  .2  .3         .4   .5
+
+Usage:
+    sudo python3 topology.py
+    (requires Mininet and POX controller running)
 """
 
 from mininet.net import Mininet
-from mininet.node import RemoteController, OVSKernelSwitch
+from mininet.node import RemoteController, OVSSwitch
 from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink
@@ -23,163 +34,104 @@ from mininet.link import TCLink
 
 def build_topology():
     """
-    Creates and returns a Mininet instance with:
-      - 1 OVS switch (s1) running in OpenFlow 1.0 mode
-      - 3 hosts with static IPs and MACs
-      - A remote POX controller on 127.0.0.1:6633
+    Build and return a Mininet network with:
+      - 2 OVS switches (s1, s2) connected via a trunk link
+      - 5 hosts (h1-h3 on s1, h4-h5 on s2)
+      - Remote POX controller on 127.0.0.1:6633
     """
-    # ----------------------------------------------------------------
-    # Network object  (TCLink lets us set bandwidth/delay if needed)
-    # ----------------------------------------------------------------
     net = Mininet(
         controller=RemoteController,
-        switch=OVSKernelSwitch,
+        switch=OVSSwitch,
         link=TCLink,
-        autoSetMacs=False,   # we assign MACs manually
-        autoStaticArp=False, # we want to observe ARP resolution in action
+        autoSetMacs=True,    # assign deterministic MACs (00:00:00:00:00:01 etc.)
+        autoStaticArp=False  # DO NOT pre-populate ARP — let our controller handle it
     )
 
-    # ----------------------------------------------------------------
-    # Controller
-    # ----------------------------------------------------------------
-    info("*** Adding remote POX controller\n")
+    info("*** Adding POX controller\n")
     c0 = net.addController(
-        "c0",
+        'c0',
         controller=RemoteController,
-        ip="127.0.0.1",
-        port=6633,
+        ip='127.0.0.1',
+        port=6633
     )
 
-    # ----------------------------------------------------------------
-    # Switch
-    # ----------------------------------------------------------------
-    info("*** Adding switch s1\n")
-    s1 = net.addSwitch("s1", cls=OVSKernelSwitch, protocols="OpenFlow10")
+    info("*** Adding switches\n")
+    s1 = net.addSwitch('s1', protocols='OpenFlow10')
+    s2 = net.addSwitch('s2', protocols='OpenFlow10')
 
-    # ----------------------------------------------------------------
-    # Hosts  (static IP and MAC so ARP mappings are deterministic)
-    # ----------------------------------------------------------------
     info("*** Adding hosts\n")
-    # No default gateway needed – all hosts share the same /24 subnet and
-    # communicate directly.  A self-referential gateway would be incorrect.
-    h1 = net.addHost(
-        "h1",
-        ip="10.0.0.1/24",
-        mac="00:00:00:00:00:01",
-    )
-    h2 = net.addHost(
-        "h2",
-        ip="10.0.0.2/24",
-        mac="00:00:00:00:00:02",
-    )
-    h3 = net.addHost(
-        "h3",
-        ip="10.0.0.3/24",
-        mac="00:00:00:00:00:03",
-    )
+    # Switch s1 hosts
+    h1 = net.addHost('h1', ip='10.0.0.1/24', mac='00:00:00:00:00:01')
+    h2 = net.addHost('h2', ip='10.0.0.2/24', mac='00:00:00:00:00:02')
+    h3 = net.addHost('h3', ip='10.0.0.3/24', mac='00:00:00:00:00:03')
+    # Switch s2 hosts
+    h4 = net.addHost('h4', ip='10.0.0.4/24', mac='00:00:00:00:00:04')
+    h5 = net.addHost('h5', ip='10.0.0.5/24', mac='00:00:00:00:00:05')
 
-    # ----------------------------------------------------------------
-    # Links  (bandwidth 10 Mbps, delay 2 ms – visible in iperf/ping)
-    # ----------------------------------------------------------------
-    info("*** Creating links\n")
-    net.addLink(h1, s1, bw=10, delay="2ms")
-    net.addLink(h2, s1, bw=10, delay="2ms")
-    net.addLink(h3, s1, bw=10, delay="2ms")
+    info("*** Adding links\n")
+    # Host-to-switch links (100 Mbps, 1ms delay)
+    net.addLink(h1, s1, bw=100, delay='1ms')
+    net.addLink(h2, s1, bw=100, delay='1ms')
+    net.addLink(h3, s1, bw=100, delay='1ms')
+    net.addLink(h4, s2, bw=100, delay='1ms')
+    net.addLink(h5, s2, bw=100, delay='1ms')
+    # Switch-to-switch trunk link (1 Gbps, 2ms delay)
+    net.addLink(s1, s2, bw=1000, delay='2ms')
 
-    return net, c0, s1, h1, h2, h3
+    return net, c0
 
 
-def run_tests(net, h1, h2, h3):
+def run_tests(net):
     """
-    Automated test scenarios executed after the network is started.
-
-    Scenario 1 – Normal ARP Resolution and Ping Success
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    h1 pings h2.  The controller intercepts the ARP request, builds a reply
-    (once h2's IP→MAC is known), and installs a flow rule.  Subsequent ICMP
-    packets are forwarded in-dataplane without hitting the controller.
-
-    Scenario 2 – Ping to All Hosts (three-way reachability)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Mininet's built-in pingAll verifies that every pair of hosts can reach
-    each other after ARP has been resolved.
-
-    Scenario 3 – Negative Test: Isolated ping before ARP population
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    We flush the ARP tables and ping h3 from h1 to show that the controller
-    floods the first ARP request (unknown target) and then replies on the
-    second attempt once the mapping has been learned.
+    Automated test scenarios executed after network start.
+    Scenario 1: Intra-switch ARP + ping (h1 → h2, same switch)
+    Scenario 2: Inter-switch ARP + ping (h1 → h4, cross switches)
+    Scenario 3: All-hosts connectivity matrix (net.pingAll)
     """
-    info("\n" + "=" * 60 + "\n")
-    info("SCENARIO 1 – Normal ARP resolution: h1 ping h2\n")
-    info("=" * 60 + "\n")
-    result = h1.cmd("ping -c 3 10.0.0.2")
-    info(result)
+    info("\n" + "="*60 + "\n")
+    info("SCENARIO 1: Intra-switch ping  h1 → h2\n")
+    info("="*60 + "\n")
+    result = net.get('h1').cmd('ping -c 3 10.0.0.2')
+    info(result + "\n")
 
-    info("\n" + "=" * 60 + "\n")
-    info("SCENARIO 2 – Full mesh reachability (pingAll)\n")
-    info("=" * 60 + "\n")
-    loss = net.pingAll()
-    info("Packet loss: %s%%\n" % loss)
+    info("="*60 + "\n")
+    info("SCENARIO 2: Inter-switch ping  h1 → h4\n")
+    info("="*60 + "\n")
+    result = net.get('h1').cmd('ping -c 3 10.0.0.4')
+    info(result + "\n")
 
-    info("\n" + "=" * 60 + "\n")
-    info("SCENARIO 3 – ARP table flush then ping h3 from h1\n")
-    info("(First ping may show flooding; second should succeed)\n")
-    info("=" * 60 + "\n")
-    # Flush ARP caches on h1 and h3
-    h1.cmd("ip neigh flush all")
-    h3.cmd("ip neigh flush all")
-    result1 = h1.cmd("ping -c 1 10.0.0.3")
-    info("First ping (ARP flood expected):\n" + result1)
-    result2 = h1.cmd("ping -c 3 10.0.0.3")
-    info("Second ping (flow rule in place):\n" + result2)
+    info("="*60 + "\n")
+    info("SCENARIO 3: Full connectivity matrix (pingAll)\n")
+    info("="*60 + "\n")
+    net.pingAll()
 
-    info("\n" + "=" * 60 + "\n")
-    info("ARP TABLES after tests\n")
-    info("=" * 60 + "\n")
-    for host in (h1, h2, h3):
-        info("--- %s ---\n" % host.name)
-        info(host.cmd("arp -n") + "\n")
-
-    info("\n" + "=" * 60 + "\n")
-    info("FLOW TABLES on s1\n")
-    info("=" * 60 + "\n")
-    import subprocess
-    result = subprocess.run(
-        ["ovs-ofctl", "dump-flows", "s1"],
-        capture_output=True, text=True,
-    )
-    info(result.stdout + "\n")
+    info("="*60 + "\n")
+    info("SCENARIO 4: iperf throughput  h1 (server) ↔ h3 (client)\n")
+    info("="*60 + "\n")
+    net.iperf([net.get('h1'), net.get('h3')], seconds=5)
 
 
 def main():
-    setLogLevel("info")
+    setLogLevel('info')
 
-    info("*** Building topology\n")
-    net, c0, s1, h1, h2, h3 = build_topology()
+    info("*** Building SDN ARP topology\n")
+    net, c0 = build_topology()
 
     info("*** Starting network\n")
     net.start()
 
-    # Ensure OVS uses OpenFlow 1.0 on this switch
-    s1.cmd("ovs-vsctl set bridge s1 protocols=OpenFlow10")
+    info("\n*** Waiting 3 seconds for controller to connect...\n")
+    import time; time.sleep(3)
 
-    info("\n*** Network is up.  Running automated tests...\n")
-    run_tests(net, h1, h2, h3)
+    info("*** Running automated test scenarios\n")
+    run_tests(net)
 
-    info("\n*** Dropping into Mininet CLI for interactive testing.\n")
-    info("Useful commands:\n")
-    info("  h1 ping h2          – test connectivity\n")
-    info("  h1 arp -n           – view ARP cache\n")
-    info("  dpctl dump-flows    – show flow entries\n")
-    info("  h1 iperf -s &       – start iperf server on h1\n")
-    info("  h2 iperf -c 10.0.0.1 -t 5  – test throughput\n")
-    info("  exit                – quit Mininet\n\n")
+    info("\n*** Entering Mininet CLI (type 'exit' to quit)\n")
     CLI(net)
 
     info("*** Stopping network\n")
     net.stop()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
